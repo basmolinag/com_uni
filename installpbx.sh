@@ -5,7 +5,7 @@
 #  Compatible con Ubuntu 22.04 LTS y Ubuntu 24.04 LTS
 #
 #  Autor:   CUY5132 — Comunicaciones Unificadas y VoIP — DUOC UC
-#  Versión: 4.1
+#  Versión: 4.2
 #  Uso:     sudo bash install_pbx.sh
 # =============================================================================
 
@@ -29,7 +29,10 @@ ASTERISK_URL="https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${A
 PHP_TARGET="8.2"
 
 CURRENT_STEP="Inicializacion"
-INSTALL_START=$(date '+%Y-%m-%d %H:%M:%S')
+INSTALL_START="$(date '+%Y-%m-%d %H:%M:%S')"
+UBUNTU_VERSION=""
+PHP_DEFAULT=""
+ASTERISK_DIR=""
 
 # ─── Funciones de logging ─────────────────────────────────────────────────────
 _ts() { date '+%H:%M:%S'; }
@@ -46,13 +49,14 @@ step() {
 }
 
 run() {
-  local desc="$1"; shift
+  local desc="$1"
+  shift
   info "$desc"
   echo "  [CMD $(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
   if ! "$@" >> "$LOG_FILE" 2>&1; then
     local rc=$?
     echo "  [FAIL $(date '+%H:%M:%S')] codigo=$rc  cmd=$*" >> "$LOG_FILE"
-    return $rc
+    return "$rc"
   fi
   echo "  [DONE $(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
 }
@@ -62,7 +66,7 @@ banner() {
   echo "╔══════════════════════════════════════════════════════════════╗"
   echo "║        Instalador PBX — Asterisk 22 + FreePBX 17            ║"
   echo "║        CUY5132 — DUOC UC  |  Ubuntu 22.04 / 24.04           ║"
-  echo "║        Version 4.1  —  Log: /var/log/install_pbx.log        ║"
+  echo "║        Version 4.2  —  Log: /var/log/install_pbx.log        ║"
   echo "╚══════════════════════════════════════════════════════════════╝"
   echo -e "${NC}"
 }
@@ -73,14 +77,8 @@ on_error() {
   local line_number=$1
   local failed_cmd="${BASH_COMMAND}"
 
-  echo -e "\n${RED}${BOLD}" | tee -a "$LOG_FILE"
-  echo "╔══════════════════════════════════════════════════════════════╗" | tee -a "$LOG_FILE"
-  echo "║              ERROR — INSTALACION FALLIDA                    ║" | tee -a "$LOG_FILE"
-  echo "╚══════════════════════════════════════════════════════════════╝" | tee -a "$LOG_FILE"
-  echo -e "${NC}" | tee -a "$LOG_FILE"
-
   {
-    echo ""
+    echo
     echo "===================================================="
     echo "  REPORTE DE ERROR  —  $(date '+%Y-%m-%d %H:%M:%S')"
     echo "===================================================="
@@ -96,10 +94,10 @@ on_error() {
     echo "  SO           : $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')"
     echo "  Kernel       : $(uname -r)"
     echo "  Arquitectura : $(uname -m)"
-    echo ""
+    echo
     echo "  Memoria RAM:"
     free -h | awk 'NR==2{printf "    Total: %-8s  Usado: %-8s  Libre: %s\n", $2, $3, $4}'
-    echo ""
+    echo
     echo "  Espacio en disco:"
     df -h /usr/src / 2>/dev/null | awk 'NR>1{printf "    %-12s Total: %-8s  Usado: %-8s  Libre: %s (%s)\n", $6, $2, $3, $4, $5}'
     echo "===================================================="
@@ -115,20 +113,11 @@ on_error() {
     echo "  Node.js    : $(node -v 2>/dev/null || echo 'no instalado')"
     echo "  MariaDB    : $(mysql --version 2>/dev/null || echo 'no instalado')"
     echo "===================================================="
-    echo "  ULTIMAS 50 LINEAS DEL LOG (contexto del fallo)"
+    echo "  ULTIMAS 50 LINEAS DEL LOG"
     echo "===================================================="
+    tail -50 "$LOG_FILE" 2>/dev/null || true
+    echo
   } | tee -a "$LOG_FILE"
-
-  grep -v "ULTIMAS 50" "$LOG_FILE" | tail -50 | tee -a "$LOG_FILE"
-
-  echo "" | tee -a "$LOG_FILE"
-  echo -e "${YELLOW}${BOLD}  Que hacer ahora:${NC}"
-  echo -e "${YELLOW}  1. Comparta el log completo con su docente:${NC}"
-  echo -e "${CYAN}       cat $LOG_FILE${NC}"
-  echo -e "${YELLOW}  2. Para ver solo el reporte de error:${NC}"
-  echo -e "${CYAN}       grep -A 80 'REPORTE DE ERROR' $LOG_FILE${NC}"
-  echo -e "${YELLOW}  3. Para seguir el log en tiempo real en otra sesion:${NC}"
-  echo -e "${CYAN}       tail -f $LOG_FILE${NC}\n"
 
   exit "$exit_code"
 }
@@ -145,15 +134,22 @@ check_root() {
 
 detect_ubuntu() {
   [[ -f /etc/os-release ]] || { error "No se puede detectar el SO."; exit 1; }
+  # shellcheck disable=SC1091
   source /etc/os-release
-  [[ "$ID" == "ubuntu" ]] || { error "Solo compatible con Ubuntu. SO detectado: $ID"; exit 1; }
 
-  UBUNTU_VERSION="$VERSION_ID"
+  [[ "${ID:-}" == "ubuntu" ]] || {
+    error "Solo compatible con Ubuntu. SO detectado: ${ID:-desconocido}"
+    exit 1
+  }
+
+  UBUNTU_VERSION="${VERSION_ID:-}"
   case "$UBUNTU_VERSION" in
     "22.04") PHP_DEFAULT="8.1" ;;
     "24.04") PHP_DEFAULT="8.3" ;;
-    *) PHP_DEFAULT="8.1"
-       warn "Ubuntu $UBUNTU_VERSION no verificado oficialmente. Continuando..." ;;
+    *)
+      PHP_DEFAULT="8.1"
+      warn "Ubuntu $UBUNTU_VERSION no verificado oficialmente. Continuando..."
+      ;;
   esac
 
   ok "Sistema detectado: Ubuntu $UBUNTU_VERSION"
@@ -162,7 +158,7 @@ detect_ubuntu() {
 
 check_internet() {
   info "Verificando conexion a internet..."
-  if ! curl -s --max-time 10 https://downloads.asterisk.org > /dev/null; then
+  if ! curl -fsSL --max-time 15 https://downloads.asterisk.org/ > /dev/null; then
     error "Sin conexion a internet o el servidor de Asterisk no responde."
     exit 1
   fi
@@ -172,9 +168,11 @@ check_internet() {
 check_disk_space() {
   info "Verificando espacio en disco..."
   local free_gb
-  free_gb=$(df /usr/src --output=avail -BG | tail -1 | tr -d 'G ')
+  free_gb="$(df /usr/src --output=avail -BG 2>/dev/null | tail -1 | tr -d 'G ' || true)"
+  [[ -n "$free_gb" ]] || free_gb="$(df / --output=avail -BG | tail -1 | tr -d 'G ')"
+
   if [[ "$free_gb" -lt 5 ]]; then
-    error "Espacio insuficiente. Se requieren al menos 5 GB libres en /usr/src."
+    error "Espacio insuficiente. Se requieren al menos 5 GB libres."
     error "Espacio disponible: ${free_gb} GB"
     exit 1
   fi
@@ -191,9 +189,7 @@ check_previous_installation() {
   local needs_cleanup=false
 
   if command -v asterisk > /dev/null 2>&1; then
-    local ast_ver
-    ast_ver=$(asterisk -V 2>/dev/null || echo "desconocida")
-    warn "Asterisk detectado en el sistema: $ast_ver"
+    warn "Asterisk detectado en el sistema: $(asterisk -V 2>/dev/null || echo 'desconocida')"
     has_asterisk=true
     needs_cleanup=true
   fi
@@ -204,12 +200,13 @@ check_previous_installation() {
     needs_cleanup=true
   fi
 
-  if ls /usr/src/asterisk-${ASTERISK_VERSION}.* > /dev/null 2>&1; then
+  if compgen -G "/usr/src/asterisk-${ASTERISK_VERSION}.*" > /dev/null; then
     warn "Directorio de compilacion de Asterisk encontrado en /usr/src."
     has_partial_src=true
     needs_cleanup=true
   fi
-  if [[ -f /usr/src/freepbx-${FREEPBX_VERSION}-latest.tgz ]] || [[ -d /usr/src/freepbx ]]; then
+
+  if [[ -f "/usr/src/freepbx-${FREEPBX_VERSION}-latest.tgz" || -d /usr/src/freepbx ]]; then
     warn "Archivos de FreePBX encontrados en /usr/src."
     has_partial_src=true
     needs_cleanup=true
@@ -220,17 +217,13 @@ check_previous_installation() {
     return 0
   fi
 
-  echo -e "
-${YELLOW}${BOLD}  Se detectaron los siguientes componentes previos:${NC}"
-  [[ "$has_asterisk" == true ]] && echo -e "${YELLOW}    * Asterisk instalado${NC}"
-  [[ "$has_freepbx" == true ]] && echo -e "${YELLOW}    * FreePBX instalado${NC}"
-  [[ "$has_partial_src" == true ]] && echo -e "${YELLOW}    * Archivos de compilacion en /usr/src${NC}"
-  echo ""
-  echo -e "${YELLOW}  Continuar sin limpiar puede causar conflictos o fallos.${NC}"
-  echo -e "${YELLOW}  Se recomienda limpiar antes de reinstalar.${NC}
-"
+  echo -e "\n${YELLOW}${BOLD}Se detectaron componentes previos:${NC}"
+  [[ "$has_asterisk" == true ]] && echo -e "${YELLOW}  * Asterisk instalado${NC}"
+  [[ "$has_freepbx" == true ]] && echo -e "${YELLOW}  * FreePBX instalado${NC}"
+  [[ "$has_partial_src" == true ]] && echo -e "${YELLOW}  * Archivos de compilacion en /usr/src${NC}"
+  echo
 
-  echo -e "${YELLOW}  Desea limpiar la instalacion previa y continuar? [s/N]: ${NC}"
+  echo -e "${YELLOW}Desea limpiar la instalacion previa y continuar? [s/N]: ${NC}"
   read -r -t 20 CLEAN_CONFIRM || CLEAN_CONFIRM="s"
 
   if [[ "$CLEAN_CONFIRM" =~ ^[sS]$ ]]; then
@@ -251,26 +244,30 @@ cleanup_previous() {
   info "Deteniendo servicios activos..."
   for svc in asterisk apache2 mariadb; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
-      systemctl stop "$svc" >> "$LOG_FILE" 2>&1 && info "  Servicio $svc detenido." || true
+      systemctl stop "$svc" >> "$LOG_FILE" 2>&1 || true
+      info "  Servicio $svc detenido."
     fi
   done
 
   if [[ "$do_asterisk" == true ]]; then
     info "Eliminando Asterisk..."
-    local ast_src
-    ast_src=$(find /usr/src -maxdepth 1 -type d -name "asterisk-${ASTERISK_VERSION}.*" 2>/dev/null | head -1)
+    local ast_src=""
+    ast_src="$(find /usr/src -maxdepth 1 -type d -name "asterisk-${ASTERISK_VERSION}.*" 2>/dev/null | head -1 || true)"
     if [[ -n "$ast_src" ]]; then
-      cd "$ast_src" && make uninstall >> "$LOG_FILE" 2>&1 || true
-      cd /usr/src
+      (
+        cd "$ast_src"
+        make uninstall >> "$LOG_FILE" 2>&1 || true
+      )
     fi
-    rm -f  /usr/sbin/asterisk >> "$LOG_FILE" 2>&1 || true
+
+    rm -f /usr/sbin/asterisk >> "$LOG_FILE" 2>&1 || true
     rm -rf /etc/asterisk >> "$LOG_FILE" 2>&1 || true
     rm -rf /var/lib/asterisk >> "$LOG_FILE" 2>&1 || true
     rm -rf /var/log/asterisk >> "$LOG_FILE" 2>&1 || true
     rm -rf /var/spool/asterisk >> "$LOG_FILE" 2>&1 || true
     rm -rf /usr/lib/asterisk >> "$LOG_FILE" 2>&1 || true
-    rm -f  /etc/init.d/asterisk >> "$LOG_FILE" 2>&1 || true
-    rm -f  /etc/default/asterisk >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/init.d/asterisk >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/default/asterisk >> "$LOG_FILE" 2>&1 || true
     systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
     id asterisk > /dev/null 2>&1 && userdel asterisk >> "$LOG_FILE" 2>&1 || true
     getent group asterisk > /dev/null 2>&1 && groupdel asterisk >> "$LOG_FILE" 2>&1 || true
@@ -282,11 +279,13 @@ cleanup_previous() {
     if command -v fwconsole > /dev/null 2>&1; then
       fwconsole stop >> "$LOG_FILE" 2>&1 || true
     fi
+
     rm -rf /var/www/html/admin >> "$LOG_FILE" 2>&1 || true
-    rm -rf /var/www/html/index.php >> "$LOG_FILE" 2>&1 || true
-    rm -rf /etc/freepbx.conf >> "$LOG_FILE" 2>&1 || true
+    rm -f /var/www/html/index.php >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/freepbx.conf >> "$LOG_FILE" 2>&1 || true
     rm -rf /etc/asterisk/freepbx_* >> "$LOG_FILE" 2>&1 || true
-    rm -f  /usr/sbin/fwconsole >> "$LOG_FILE" 2>&1 || true
+    rm -f /usr/sbin/fwconsole >> "$LOG_FILE" 2>&1 || true
+
     if systemctl is-active --quiet mariadb 2>/dev/null || systemctl start mariadb >> "$LOG_FILE" 2>&1; then
       mysql -e "DROP DATABASE IF EXISTS asterisk;" >> "$LOG_FILE" 2>&1 || true
       mysql -e "DROP DATABASE IF EXISTS asteriskcdrdb;" >> "$LOG_FILE" 2>&1 || true
@@ -313,7 +312,7 @@ install_dependencies() {
     sox pkg-config libedit-dev unzip git gnupg2 curl \
     libnewt-dev libssl-dev libncurses5-dev subversion \
     libsqlite3-dev build-essential libjansson-dev libxml2-dev \
-    uuid-dev software-properties-common wget
+    uuid-dev software-properties-common wget ca-certificates lsb-release
   ok "Dependencias instaladas correctamente."
 }
 
@@ -329,8 +328,12 @@ install_asterisk() {
 
   run "Extrayendo archivo..." tar -xzf "asterisk-${ASTERISK_VERSION}-current.tar.gz"
 
-  ASTERISK_DIR=$(find /usr/src -maxdepth 1 -type d -name "asterisk-${ASTERISK_VERSION}.*" | head -1)
-  [[ -n "$ASTERISK_DIR" ]] || { error "No se encontro el directorio de Asterisk extraido."; exit 1; }
+  ASTERISK_DIR="$(find /usr/src -maxdepth 1 -type d -name "asterisk-${ASTERISK_VERSION}.*" | head -1)"
+  [[ -n "$ASTERISK_DIR" ]] || {
+    error "No se encontro el directorio de Asterisk extraido."
+    exit 1
+  }
+
   info "Directorio de compilacion: $ASTERISK_DIR"
   cd "$ASTERISK_DIR"
 
@@ -350,7 +353,6 @@ install_asterisk() {
     --enable CORE-SOUNDS-EN-ULAW \
     --enable CORE-SOUNDS-EN-ALAW \
     --enable CORE-SOUNDS-EN-GSM \
-    --enable CORE-SOUNDS-EN-G729 \
     --enable MOH-OPSOUND-WAV \
     --enable MOH-OPSOUND-ULAW \
     --enable MOH-OPSOUND-ALAW \
@@ -392,10 +394,15 @@ configure_asterisk() {
   ok "Permisos aplicados."
 
   info "Configurando /etc/default/asterisk..."
-  sed -i 's/^#*\s*AST_USER=.*/AST_USER="asterisk"/' /etc/default/asterisk 2>/dev/null || \
-    echo 'AST_USER="asterisk"' >> /etc/default/asterisk
-  sed -i 's/^#*\s*AST_GROUP=.*/AST_GROUP="asterisk"/' /etc/default/asterisk 2>/dev/null || \
-    echo 'AST_GROUP="asterisk"' >> /etc/default/asterisk
+  if [[ -f /etc/default/asterisk ]]; then
+    sed -i 's/^#*\s*AST_USER=.*/AST_USER="asterisk"/' /etc/default/asterisk
+    sed -i 's/^#*\s*AST_GROUP=.*/AST_GROUP="asterisk"/' /etc/default/asterisk
+  else
+    {
+      echo 'AST_USER="asterisk"'
+      echo 'AST_GROUP="asterisk"'
+    } > /etc/default/asterisk
+  fi
 
   info "Configurando runuser/rungroup en asterisk.conf..."
   sed -i 's/^;*\s*runuser\s*=.*/runuser = asterisk/' /etc/asterisk/asterisk.conf
@@ -418,7 +425,7 @@ configure_asterisk() {
     echo "  [INFO] PID: $(systemctl show asterisk --property=MainPID --value)" >> "$LOG_FILE"
   else
     warn "Asterisk no levanto correctamente. Volcando journalctl al log..."
-    journalctl -u asterisk -n 40 --no-pager >> "$LOG_FILE" 2>&1
+    journalctl -u asterisk -n 40 --no-pager >> "$LOG_FILE" 2>&1 || true
     error "Asterisk no esta activo. Revise el log para mas detalles."
     exit 1
   fi
@@ -462,13 +469,14 @@ install_php82() {
   update-alternatives --set phar /usr/bin/phar${PHP_TARGET} >> "$LOG_FILE" 2>&1 || true
   update-alternatives --set phar.phar /usr/bin/phar.phar${PHP_TARGET} >> "$LOG_FILE" 2>&1 || true
 
-  ACTIVE_PHP=$(php -v 2>/dev/null | head -1 | awk '{print $2}' | cut -d. -f1,2)
-  echo "  [INFO] php -v -> $ACTIVE_PHP" >> "$LOG_FILE"
+  local active_php
+  active_php="$(php -v 2>/dev/null | head -1 | awk '{print $2}' | cut -d. -f1,2 || true)"
+  echo "  [INFO] php -v -> $active_php" >> "$LOG_FILE"
 
-  if [[ "$ACTIVE_PHP" == "$PHP_TARGET" ]]; then
+  if [[ "$active_php" == "$PHP_TARGET" ]]; then
     ok "PHP $PHP_TARGET activo correctamente."
   else
-    warn "Version activa de PHP: '$ACTIVE_PHP' (se esperaba '$PHP_TARGET')."
+    warn "Version activa de PHP: '$active_php' (se esperaba '$PHP_TARGET')."
     warn "Intente: update-alternatives --set php /usr/bin/php${PHP_TARGET}"
   fi
 }
@@ -567,22 +575,22 @@ configure_firewall() {
 
 # ─── Resumen final ────────────────────────────────────────────────────────────
 show_summary() {
-  local SERVER_IP
-  SERVER_IP=$(hostname -I | awk '{print $1}')
-  local END_TIME
-  END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+  local server_ip
+  local end_time
+  server_ip="$(hostname -I | awk '{print $1}')"
+  end_time="$(date '+%Y-%m-%d %H:%M:%S')"
 
   {
-    echo ""
+    echo
     echo "===================================================="
     echo "  RESUMEN DE INSTALACION EXITOSA"
     echo "  Inicio : $INSTALL_START"
-    echo "  Fin    : $END_TIME"
+    echo "  Fin    : $end_time"
     echo "  Ubuntu   : $UBUNTU_VERSION"
     echo "  Asterisk : $ASTERISK_VERSION"
     echo "  FreePBX  : $FREEPBX_VERSION"
     echo "  PHP      : $PHP_TARGET (reemplazo PHP $PHP_DEFAULT)"
-    echo "  URL      : http://$SERVER_IP/admin"
+    echo "  URL      : http://$server_ip/admin"
     echo "===================================================="
   } >> "$LOG_FILE"
 
@@ -591,21 +599,21 @@ show_summary() {
   echo "║                  OK  INSTALACION COMPLETA                   ║"
   echo "╚══════════════════════════════════════════════════════════════╝"
   echo -e "${NC}"
-  echo -e "${BOLD}  Resumen:${NC}"
+  echo -e "${BOLD}Resumen:${NC}"
   echo -e "  Ubuntu   : ${CYAN}$UBUNTU_VERSION${NC}"
   echo -e "  Asterisk : ${CYAN}$ASTERISK_VERSION${NC}"
   echo -e "  FreePBX  : ${CYAN}$FREEPBX_VERSION${NC}"
   echo -e "  PHP      : ${CYAN}$PHP_TARGET${NC}  (reemplazo PHP $PHP_DEFAULT)"
-  echo ""
-  echo -e "${BOLD}  Acceso a FreePBX:${NC}"
-  echo -e "  URL     : ${CYAN}http://$SERVER_IP/admin${NC}"
+  echo
+  echo -e "${BOLD}Acceso a FreePBX:${NC}"
+  echo -e "  URL     : ${CYAN}http://$server_ip/admin${NC}"
   echo -e "  Usuario : ${CYAN}asterisk${NC}  (o el que configure en el primer acceso)"
-  echo ""
-  echo -e "${BOLD}  Log completo :${NC} ${CYAN}$LOG_FILE${NC}"
-  echo -e "${BOLD}  CLI Asterisk :${NC} ${CYAN}asterisk -rvv${NC}"
-  echo ""
-  echo -e "${YELLOW}  PROXIMO PASO: Abra el navegador en http://$SERVER_IP/admin${NC}"
-  echo -e "${YELLOW}  y complete la configuracion inicial del administrador.${NC}\n"
+  echo
+  echo -e "${BOLD}Log completo:${NC} ${CYAN}$LOG_FILE${NC}"
+  echo -e "${BOLD}CLI Asterisk:${NC} ${CYAN}asterisk -rvv${NC}"
+  echo
+  echo -e "${YELLOW}PROXIMO PASO: Abra el navegador en http://$server_ip/admin${NC}"
+  echo -e "${YELLOW}y complete la configuracion inicial del administrador.${NC}\n"
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -618,7 +626,7 @@ main() {
   {
     echo "===================================================="
     echo "  INICIO DE INSTALACION: $INSTALL_START"
-    echo "  Script version: 4.1"
+    echo "  Script version: 4.2"
     echo "  Ejecutado por : $(whoami) (UID=$EUID)"
     echo "  Hostname      : $(hostname)"
     echo "===================================================="
@@ -636,11 +644,14 @@ main() {
   echo -e "  * PHP $PHP_TARGET (desde PPA Ondrej, reemplazando PHP $PHP_DEFAULT)"
   echo -e "  * FreePBX $FREEPBX_VERSION"
   echo -e "  * Firewall UFW con reglas VoIP"
-  echo -e "\n  Para seguir el log en otra terminal: ${CYAN}tail -f $LOG_FILE${NC}\n"
+  echo -e "\nPara seguir el log en otra terminal: ${CYAN}tail -f $LOG_FILE${NC}\n"
 
   echo -e "${YELLOW}Desea continuar? [s/N]: ${NC}"
   read -r -t 15 CONFIRM || CONFIRM="s"
-  [[ "$CONFIRM" =~ ^[sS]$ ]] || { echo "Instalacion cancelada."; exit 0; }
+  [[ "$CONFIRM" =~ ^[sS]$ ]] || {
+    echo "Instalacion cancelada."
+    exit 0
+  }
 
   install_dependencies
   install_asterisk
